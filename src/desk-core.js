@@ -1318,7 +1318,7 @@ def normalise(path):
           <h2 style="margin-left:2px">PipSage Desk</h2>
         </div>
         <div class="modal-body">
-          <p class="sm muted">This desk is yours alone. Set a passphrase for this device — it is stored locally and never leaves the browser.</p>
+          <p class="sm muted">Set a local convenience passphrase for this browser. It does not restrict access to the public website or encrypt data stored on this device.</p>
           <form id="gate-form" style="display:grid;gap:10px">
             <div class="field">
               <label for="gate-pass">Passphrase</label>

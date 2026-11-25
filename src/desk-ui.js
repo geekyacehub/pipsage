@@ -133,7 +133,7 @@
 
   /* derive live-ish trade numbers */
   ui.liveTrade = function (t) {
-    const px = t.status === 'open' ? PS.price(t.sym) : t.exit;
+    const px = t.status === 'open' ? PS.price(t.sym, t.side) : t.exit;
     const pnl = t.status === 'open' ? PS.pnlFor(t.sym, t.side, t.lots, t.entry, px) : t.pnl;
     const r = PS.rFor(t.sym, t.side, t.lots, t.entry, px, t.sl);
     return Object.assign({}, t, {

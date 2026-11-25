@@ -1,0 +1,2 @@
+# Windows desktop terminal connector; no MT5 account password is passed to Python.
+MetaTrader5>=5.0.45,<6

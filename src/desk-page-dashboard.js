@@ -29,7 +29,7 @@
     /* KPI tiles */
     const kpis = `<div class="grid g6">
       ${ui.kpi({ k: 'Equity', v: money(equity, ccy, 0), d: `<span class="num">${money(acc.balance, ccy, 0)}</span> balance`, accent: true, iconName: 'gauge' })}
-      ${ui.kpi({ k: 'Open P&L', v: `<span class="${klass(acc.openPnl)}">${money(acc.openPnl, ccy)}</span>`, d: `${acc.open.length} position${acc.open.length === 1 ? '' : 's'}`, iconName: 'layers' })}
+      ${ui.kpi({ k: 'Open P&L', v: `<span class="${klass(acc.openPnl)}" data-live-total-pnl>${money(acc.openPnl, ccy)}</span>`, d: `${acc.open.length} position${acc.open.length === 1 ? '' : 's'}`, iconName: 'layers' })}
       ${ui.kpi({ k: 'Today', v: `<span class="${klass(todayPnl)}">${money(todayPnl, ccy)}</span>`, d: `${todayClosed.length} closed`, iconName: 'clock' })}
       ${ui.kpi({ k: 'Realised', v: `<span class="${klass(stats.net)}">${money(stats.net, ccy)}</span>`, d: `${stats.count} trades all-time`, iconName: 'chart' })}
       ${ui.kpi({ k: 'Win rate', v: fmt(stats.winRate, 1) + '<small>%</small>', d: `${stats.wins}W · ${stats.losses}L`, iconName: 'target' })}
@@ -89,16 +89,16 @@
         <td><strong>${esc(t.sym)}</strong><div class="xs dim">${esc(t.setup || '')}</div></td>
         <td>${ui.chip(t.side.toUpperCase(), t.side === 'buy' ? 'green' : 'red')}</td>
         <td class="num">${PS.fmtPrice(t.entry)}</td>
-        <td class="num">${PS.fmtPrice(t.markPrice)}</td>
-        <td class="num ${klass(t.livePnl)}">${money(t.livePnl, ccy)}</td>
-        <td class="num ${klass(t.liveR)}">${signed(t.liveR, 2)}R</td>
+        <td class="num" data-market-price="${t.sym}" data-market-side="${t.side}">${PS.fmtPrice(t.markPrice)}</td>
+        <td class="num ${klass(t.livePnl)}" data-live-pnl="${t.sym}" data-side="${t.side}" data-lots="${t.lots}" data-entry="${t.entry}">${money(t.livePnl, ccy)}</td>
+        <td class="num ${klass(t.liveR)}" data-live-r="${t.sym}" data-side="${t.side}" data-lots="${t.lots}" data-entry="${t.entry}" data-stop="${t.sl || 0}">${signed(t.liveR, 2)}R</td>
       </tr>`;
     });
 
     const positionsPanel = ui.panel({
       title: 'Open positions',
-      sub: `${acc.open.length} live · marks are sample prices`,
-      right: `<a class="btn btn-sm btn-ghost" href="positions.html">Manage ${icon('arrowRight')}</a>`,
+      sub: `${acc.open.length} local journal position${acc.open.length === 1 ? '' : 's'} · marks use current feed when connected`,
+      right: `<span class="chip chip-amber" data-market-feed>sample feed</span><a class="btn btn-sm btn-ghost" href="positions.html">Manage ${icon('arrowRight')}</a>`,
       flush: true,
       body: ui.table({
         cols: ['Instrument', 'Side', { label: 'Entry', num: true }, { label: 'Mark', num: true }, { label: 'P&L', num: true }, { label: 'R', num: true }],
@@ -115,15 +115,15 @@
       const series = PS.candles(sym, 24).map((c) => c.c);
       return `<tr>
         <td><strong>${esc(sym)}</strong><div class="xs dim">${esc(meta.cls)}</div></td>
-        <td class="num">${fmt(px, meta.dec)}</td>
-        <td class="num ${klass(chg)}">${pctStr(chg)}</td>
+        <td class="num" data-market-price="${sym}">${fmt(px, meta.dec)}</td>
+        <td class="num ${klass(chg)}" data-market-day="${sym}">${pctStr(chg)}</td>
         <td style="width:74px">${PS.sparkSvg(series, { w: 66, h: 18 })}</td>
       </tr>`;
     });
 
     const watchPanel = ui.panel({
       title: 'Watchlist',
-      right: `<a class="btn btn-sm btn-ghost" href="charts.html">Charts ${icon('arrowRight')}</a>`,
+      right: `<span class="chip chip-amber" data-market-feed>sample feed</span><a class="btn btn-sm btn-ghost" href="charts.html">Charts ${icon('arrowRight')}</a>`,
       flush: true,
       body: ui.table({
         cols: ['Market', { label: 'Price', num: true }, { label: 'Day', num: true }, { label: '', num: false }],

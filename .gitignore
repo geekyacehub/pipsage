@@ -1,0 +1,14 @@
+# Local Python bridge environment and configuration
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+bridge/symbol-map.local.json
+.env
+.env.*
+!.env.example
+
+# Node / generated test output
+node_modules/
+coverage/
+.DS_Store
