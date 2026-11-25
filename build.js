@@ -19,6 +19,19 @@ const ROOT = __dirname;
 const SRC = path.join(ROOT, 'src');
 const read = (p) => fs.readFileSync(p, 'utf8');
 
+const apiUrlSetting = String(process.env.PIPSAGE_API_URL || '').trim();
+let PIPSAGE_API_URL = '';
+if (apiUrlSetting) {
+  let parsedApiUrl;
+  try { parsedApiUrl = new URL(apiUrlSetting); }
+  catch (_) { throw new Error('PIPSAGE_API_URL must be an HTTPS service origin.'); }
+  if (parsedApiUrl.protocol !== 'https:' || parsedApiUrl.username || parsedApiUrl.password || parsedApiUrl.pathname !== '/' || parsedApiUrl.search || parsedApiUrl.hash) {
+    throw new Error('PIPSAGE_API_URL must be an HTTPS origin with no credentials, path, query, or fragment.');
+  }
+  PIPSAGE_API_URL = parsedApiUrl.origin;
+}
+const API_URL_JSON = JSON.stringify(PIPSAGE_API_URL).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
+
 const PAGES = [
   { file: 'dashboard.html', page: 'dashboard', nav: 'dashboard.html', title: 'Dashboard', desc: 'Your desk at a glance: equity, risk, positions and the day ahead.' },
   { file: 'charts.html', page: 'charts', nav: 'charts.html', title: 'Charts', desc: 'Candlestick analysis with overlays, indicators and structure levels.' },
@@ -37,7 +50,7 @@ const PAGES = [
 ];
 
 const CSS = read(path.join(SRC, 'desk.css'));
-const JS = ['desk-core.js', 'desk-charts.js', 'desk-ui.js', 'desk-page-dashboard.js', 'desk-page-charts.js', 'desk-page-positions.js', 'desk-page-build.js', 'desk-page-risk.js', 'desk-page-rest.js']
+const JS = ['desk-core.js', 'desk-broker.js', 'desk-charts.js', 'desk-ui.js', 'desk-page-dashboard.js', 'desk-page-charts.js', 'desk-page-positions.js', 'desk-page-build.js', 'desk-page-risk.js', 'desk-page-rest.js']
   .map((f) => read(path.join(SRC, f)))
   .join('\n\n');
 
@@ -65,6 +78,7 @@ PAGES.forEach((p) => {
 <body data-page="${p.page}" data-nav="${p.nav}">
 <a class="skip" href="#app">Skip to content</a>
 <main id="app" role="main"></main>
+<script>window.PS_API_URL=${API_URL_JSON};</script>
 <script>${JS}</script>
 </body>
 </html>

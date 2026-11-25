@@ -819,6 +819,7 @@ body.rail-mini .brand-name { display: none; }
 <body data-page="charts" data-nav="charts.html">
 <a class="skip" href="#app">Skip to content</a>
 <main id="app" role="main"></main>
+<script>window.PS_API_URL="";</script>
 <script>/* ==========================================================================
    PipSage Desk — core runtime
    Store, market math, indicator library, shell chrome, UI primitives.
@@ -2139,7 +2140,7 @@ def normalise(path):
           <h2 style="margin-left:2px">PipSage Desk</h2>
         </div>
         <div class="modal-body">
-          <p class="sm muted">This desk is yours alone. Set a passphrase for this device — it is stored locally and never leaves the browser.</p>
+          <p class="sm muted">Set a local convenience passphrase for this browser. It does not restrict access to the public website or encrypt data stored on this device.</p>
           <form id="gate-form" style="display:grid;gap:10px">
             <div class="field">
               <label for="gate-pass">Passphrase</label>
@@ -2233,6 +2234,443 @@ def normalise(path):
   };
 
   document.addEventListener('DOMContentLoaded', PS.start);
+})();
+
+
+/* ==========================================================================
+   PipSage Desk — optional, owner-authenticated MT5 demo bridge client.
+   Owner token lives in tab sessionStorage only. MT5 credentials stay in the
+   already-authenticated desktop terminal and never enter this browser.
+   ========================================================================== */
+(function () {
+  'use strict';
+  const PS = window.PS;
+  const TOKEN_KEY = 'pipsage.bridge-owner-token';
+  const API_URL = String(window.PS_API_URL || '').trim().replace(/\/+$/, '');
+  const MAX_QUOTE_AGE = 10000;
+  const state = { status: null, quotes: new Map(), error: '', lastUpdate: 0, running: false, timer: null, busy: false, bindPending: false };
+  const originalPrice = PS.price;
+  const originalDailyChange = PS.dailyChange;
+
+  function token() {
+    try { return sessionStorage.getItem(TOKEN_KEY) || ''; }
+    catch (_) { return ''; }
+  }
+
+  function emit() {
+    document.dispatchEvent(new CustomEvent('pipsage:broker-update'));
+    updateMarketNodes();
+  }
+
+  function freshQuote(sym) {
+    const quote = state.quotes.get(String(sym || '').toUpperCase());
+    if (!state.status || !state.status.connected || !state.status.demo || !quote || quote.stale || Date.now() - quote.receivedAt > MAX_QUOTE_AGE) return null;
+    return quote;
+  }
+
+  async function request(path, options = {}) {
+    if (!API_URL) throw new Error('The Render static site has no PIPSAGE_API_URL build setting yet.');
+    const access = token();
+    if (!access) throw new Error('Enter the owner access token in Settings to connect this browser.');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(API_URL + path, {
+        method: options.method || 'GET',
+        headers: Object.assign({
+          Authorization: 'Bearer ' + access,
+          Accept: 'application/json',
+        }, options.body ? { 'Content-Type': 'application/json' } : {}, options.headers || {}),
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        cache: 'no-store',
+        mode: 'cors',
+        signal: controller.signal,
+      });
+      let payload = {};
+      try { payload = await response.json(); } catch (_) {}
+      if (!response.ok) throw new Error(payload.error || `API request failed (${response.status}).`);
+      return payload;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  function status() {
+    return Object.assign({
+      apiConfigured: !!API_URL,
+      authenticated: !!token(),
+      connected: false,
+      demo: false,
+      quoteCount: 0,
+      availableSymbols: [],
+      missingSymbols: [],
+      maxRiskPercent: 1.25,
+      pendingOrder: null,
+    }, state.status || {});
+  }
+
+  async function refresh() {
+    if (state.busy || !API_URL || !token()) return status();
+    state.busy = true;
+    try {
+      const snapshot = await request('/api/status');
+      const quoteData = await request('/api/quotes');
+      state.status = snapshot;
+      state.quotes.clear();
+      (quoteData.quotes || []).forEach((q) => {
+        if (!q.stale && Number.isFinite(q.bid) && Number.isFinite(q.ask) && q.ask >= q.bid && q.bid > 0) {
+          state.quotes.set(q.symbol, Object.assign({}, q, { receivedAt: Date.now() }));
+        }
+      });
+      state.error = '';
+      state.lastUpdate = Date.now();
+      emit();
+    } catch (err) {
+      state.error = err && err.name === 'AbortError' ? 'API request timed out.' : String(err && err.message || 'Connection failed.');
+      if (/Access denied|401/i.test(state.error)) {
+        try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
+        state.status = null;
+        state.quotes.clear();
+      } else if (state.status) {
+        state.status = Object.assign({}, state.status, { connected: false, demo: false });
+      }
+      emit();
+    } finally {
+      state.busy = false;
+    }
+    return status();
+  }
+
+  function start() {
+    if (state.running) return;
+    state.running = true;
+    refresh();
+    state.timer = setInterval(refresh, 2500);
+  }
+
+  async function connect(ownerToken) {
+    const value = String(ownerToken || '').trim();
+    if (!API_URL) throw new Error('API URL is not configured in the Render static-site build.');
+    if (value.length < 64) throw new Error('Owner access token must be a 64-character random token.');
+    try { sessionStorage.setItem(TOKEN_KEY, value); }
+    catch (_) { throw new Error('This browser does not allow session storage.'); }
+    state.status = null;
+    const result = await refresh();
+    if (!result.authenticated || !state.status) throw new Error(state.error || 'Could not authenticate with the PipSage API.');
+    return status();
+  }
+
+  function disconnect() {
+    try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
+    state.status = null;
+    state.quotes.clear();
+    state.error = '';
+    emit();
+    return status();
+  }
+
+  async function placeDemoOrder(order) {
+    if (!status().connected || !status().demo) throw new Error('The Exness MT5 demo bridge is not connected.');
+    return request('/api/orders', { method: 'POST', body: order });
+  }
+
+  async function getOrder(id) {
+    if (!/^[a-f0-9]{32}$/.test(String(id || ''))) throw new Error('Invalid order reference.');
+    return request('/api/orders/' + id);
+  }
+
+  async function acknowledgeUnknown(id) {
+    if (!/^[a-f0-9]{32}$/.test(String(id || ''))) throw new Error('Invalid order reference.');
+    return request('/api/orders/' + id + '/acknowledge', { method: 'POST', body: {} });
+  }
+
+  function quote(sym) { return freshQuote(sym); }
+
+  function livePrice(sym, side) {
+    const q = freshQuote(sym);
+    if (!q) return originalPrice(sym);
+    if (side === 'buy') return q.bid; // a long position exits at bid
+    if (side === 'sell') return q.ask; // a short position exits at ask
+    return (q.bid + q.ask) / 2;
+  }
+  PS.price = livePrice;
+  PS.dailyChange = function (sym) {
+    const q = freshQuote(sym);
+    return q && Number.isFinite(q.dayChange) ? q.dayChange : originalDailyChange(sym);
+  };
+
+  PS.broker = {
+    apiUrl: API_URL,
+    token,
+    status,
+    quote,
+    refresh,
+    connect,
+    disconnect,
+    placeDemoOrder,
+    getOrder,
+    acknowledgeUnknown,
+    isLive: (sym) => !!freshQuote(sym),
+  };
+
+  function updateMarketNodes() {
+    document.querySelectorAll('[data-market-price]').forEach((el) => {
+      const sym = el.getAttribute('data-market-price');
+      const q = freshQuote(sym);
+      const meta = PS.symMeta(sym);
+      const price = q ? livePrice(sym, el.dataset.marketSide) : originalPrice(sym);
+      el.textContent = PS.fmt(price, meta.dec);
+      el.title = q
+        ? `${q.brokerSymbol} · bid ${PS.fmt(q.bid, meta.dec)} / ask ${PS.fmt(q.ask, meta.dec)} · ${new Date(q.time).toLocaleTimeString()}`
+        : 'Sample price · no fresh Exness MT5 quote for this symbol';
+    });
+    document.querySelectorAll('[data-market-day]').forEach((el) => {
+      const sym = el.dataset.marketDay;
+      const change = PS.dailyChange(sym);
+      el.textContent = PS.pctStr(change);
+      el.classList.remove('up', 'dn', 'flat');
+      el.classList.add(PS.klass(change));
+      if (!freshQuote(sym)) el.title = 'Illustrative sample day change';
+      else el.title = 'Change from the current MT5 daily candle open';
+    });
+    document.querySelectorAll('[data-market-bidask]').forEach((el) => {
+      const sym = el.dataset.marketBidask;
+      const meta = PS.symMeta(sym);
+      const q = freshQuote(sym);
+      if (q) el.textContent = `${PS.fmt(q.bid, meta.dec)} / ${PS.fmt(q.ask, meta.dec)}`;
+      else {
+        const px = originalPrice(sym);
+        const spread = meta.base * 0.00002;
+        el.textContent = `${PS.fmt(px - spread, meta.dec)} / ${PS.fmt(px + spread, meta.dec)}`;
+      }
+    });
+    document.querySelectorAll('[data-market-spread]').forEach((el) => {
+      const sym = el.dataset.marketSpread;
+      const meta = PS.symMeta(sym);
+      const q = freshQuote(sym);
+      el.textContent = PS.fmt(q ? q.ask - q.bid : meta.base * 0.00004, meta.dec);
+      el.title = q ? `${q.brokerSymbol} quote spread` : 'Illustrative sample spread';
+    });
+    document.querySelectorAll('[data-live-pnl]').forEach((el) => {
+      const sym = el.dataset.livePnl;
+      const side = el.dataset.side;
+      const lots = Number(el.dataset.lots);
+      const entry = Number(el.dataset.entry);
+      const value = PS.pnlFor(sym, side, lots, entry, PS.price(sym, side));
+      el.textContent = PS.money(value, PS.settings().currency);
+      el.classList.remove('up', 'dn', 'flat');
+      el.classList.add(PS.klass(value));
+    });
+    document.querySelectorAll('[data-live-r]').forEach((el) => {
+      const sym = el.dataset.liveR;
+      const side = el.dataset.side;
+      const value = PS.rFor(sym, side, Number(el.dataset.lots), Number(el.dataset.entry), PS.price(sym, side), Number(el.dataset.stop));
+      el.textContent = PS.signed(value, 2) + 'R';
+      el.classList.remove('up', 'dn', 'flat');
+      el.classList.add(PS.klass(value));
+    });
+    document.querySelectorAll('[data-live-total-pnl]').forEach((el) => {
+      const saved = PS.Store.get(PS.KEYS.trades, []);
+      const open = (Array.isArray(saved) ? saved : []).filter((trade) => trade && trade.status === 'open');
+      const total = open.reduce((sum, trade) => sum + PS.pnlFor(trade.sym, trade.side, trade.lots, trade.entry, PS.price(trade.sym, trade.side)), 0);
+      el.textContent = PS.money(total, PS.settings().currency);
+      el.classList.remove('up', 'dn', 'flat');
+      el.classList.add(PS.klass(total));
+    });
+    const freshCount = Array.from(state.quotes.keys()).filter((sym) => !!freshQuote(sym)).length;
+    document.querySelectorAll('[data-market-feed]').forEach((el) => {
+      const connected = status().connected && freshCount > 0;
+      el.textContent = connected ? `Exness MT5 demo · ${freshCount} live` : 'sample feed';
+      el.classList.toggle('chip-teal', connected);
+      el.classList.toggle('chip-amber', !connected);
+    });
+    paintSettingsPanel();
+    paintOrderTicket();
+  }
+
+  function paintSettingsPanel() {
+    const root = document.getElementById('broker-link-panel');
+    if (!root) return;
+    const stateEl = root.querySelector('#broker-link-state');
+    const detailEl = root.querySelector('#broker-link-detail');
+    const input = root.querySelector('#broker-owner-token');
+    const disconnectButton = root.querySelector('#broker-disconnect');
+    const current = status();
+    if (input && current.authenticated && document.activeElement !== input) input.value = '';
+    if (!current.apiConfigured) {
+      stateEl.textContent = 'API not configured';
+      detailEl.textContent = 'Create the Render API service and set PIPSAGE_API_URL on the static site before connecting.';
+    } else if (!current.authenticated) {
+      stateEl.textContent = 'Not connected';
+      detailEl.textContent = 'Enter the owner access token from the API service. It is held in this tab session only.';
+    } else if (current.connected && current.demo) {
+      stateEl.textContent = `Connected · demo · ${current.quoteCount || 0} live symbols`;
+      const missing = (current.missingSymbols || []).slice(0, 6);
+      detailEl.textContent = !current.quoteCount
+        ? 'MT5 demo account is verified, but there are no fresh ticks yet. Check that Market Watch symbols are visible and the broker market is publishing quotes.'
+        : missing.length
+          ? `Some instruments are not mapped in MT5: ${missing.join(', ')}${(current.missingSymbols || []).length > 6 ? '…' : ''}. See bridge/symbol-map.local.json.`
+          : 'Exness MT5 demo verified. Market orders are demo-only and are rechecked by the desktop bridge.';
+    } else {
+      stateEl.textContent = 'API reachable · MT5 demo bridge offline';
+      detailEl.textContent = state.error || current.connectionError || 'Start the bridge on the Windows PC with MT5 open to the Exness demo account.';
+    }
+    if (disconnectButton) disconnectButton.hidden = !current.authenticated;
+  }
+
+  function paintOrderTicket() {
+    const root = document.getElementById('demo-order-ticket');
+    if (!root) return;
+    const symbol = root.querySelector('#order-symbol');
+    const side = root.querySelector('#order-side');
+    const volume = root.querySelector('#order-volume');
+    const stop = root.querySelector('#order-stop');
+    const target = root.querySelector('#order-target');
+    const preview = root.querySelector('#order-preview');
+    const button = root.querySelector('#demo-order-submit');
+    const sym = symbol && symbol.value;
+    const direction = side && side.value;
+    const quote = freshQuote(sym);
+    const statusNow = status();
+    if (quote && preview) {
+      const entry = direction === 'buy' ? quote.ask : quote.bid;
+      const sl = Number(stop && stop.value);
+      const lots = Number(volume && volume.value);
+      const risk = sl > 0 && lots > 0 ? PS.riskCashFor(sym, lots, entry, sl) : 0;
+      const equity = Number(statusNow.equity || 0);
+      const pctText = statusNow.accountCurrency === 'USD' && equity > 0 ? ` (${PS.fmt((risk / equity) * 100, 2)}% of demo equity)` : '';
+      preview.textContent = `MT5 ${quote.brokerSymbol} · bid ${PS.fmt(quote.bid, PS.symMeta(sym).dec)} / ask ${PS.fmt(quote.ask, PS.symMeta(sym).dec)} · desk-estimated stop risk ${PS.money(risk, 'USD')}${pctText}. The MT5 bridge recalculates risk in account currency using broker contract details before sending.`;
+    } else if (preview) {
+      preview.textContent = 'Waiting for an authenticated, fresh MT5 demo quote. No sample price can be used to place an order.';
+    }
+    if (button) button.disabled = !(statusNow.connected && statusNow.demo && quote && !statusNow.pendingOrder);
+    const acknowledge = root.querySelector('#order-acknowledge');
+    if (acknowledge) {
+      const needsReview = statusNow.pendingOrder && statusNow.pendingOrder.status === 'unknown';
+      acknowledge.hidden = !needsReview;
+      if (needsReview && preview) preview.textContent = 'An order result was lost. Check MT5 order history first; never assume it failed or submit a duplicate.';
+    }
+  }
+
+  function bindSettingsPanel() {
+    const root = document.getElementById('broker-link-panel');
+    if (!root || root.dataset.bound) return;
+    root.dataset.bound = '1';
+    const input = root.querySelector('#broker-owner-token');
+    root.querySelector('#broker-connect').addEventListener('click', async () => {
+      try {
+        await connect(input.value);
+        input.value = '';
+        PS.toast('PipSage API connected for this tab');
+      } catch (err) {
+        PS.toast(err.message || 'Could not connect', 'err');
+      }
+      paintSettingsPanel();
+    });
+    root.querySelector('#broker-disconnect').addEventListener('click', () => {
+      disconnect();
+      PS.toast('Broker API disconnected from this tab');
+    });
+    paintSettingsPanel();
+  }
+
+  function bindOrderTicket() {
+    const root = document.getElementById('demo-order-ticket');
+    if (!root || root.dataset.bound) return;
+    root.dataset.bound = '1';
+    ['#order-symbol', '#order-side', '#order-volume', '#order-stop', '#order-target'].forEach((selector) => {
+      const el = root.querySelector(selector);
+      if (el) { el.addEventListener('input', paintOrderTicket); el.addEventListener('change', paintOrderTicket); }
+    });
+    root.querySelector('#demo-order-submit').addEventListener('click', async () => {
+      const symbol = root.querySelector('#order-symbol').value;
+      const side = root.querySelector('#order-side').value;
+      const volume = Number(root.querySelector('#order-volume').value);
+      const stopLoss = Number(root.querySelector('#order-stop').value);
+      const targetText = root.querySelector('#order-target').value.trim();
+      const takeProfit = targetText ? Number(targetText) : null;
+      const q = freshQuote(symbol);
+      if (!q || !status().connected || !status().demo) return PS.toast('A verified demo quote is required', 'err');
+      if (!Number.isFinite(volume) || volume <= 0 || !Number.isFinite(stopLoss) || stopLoss <= 0 || (takeProfit !== null && (!Number.isFinite(takeProfit) || takeProfit <= 0))) {
+        return PS.toast('Enter a valid volume and protective stop loss', 'err');
+      }
+      const entry = side === 'buy' ? q.ask : q.bid;
+      const risk = PS.riskCashFor(symbol, volume, entry, stopLoss);
+      const maxRiskPercent = Number(status().maxRiskPercent || 1.25);
+      const text = `Send a DEMO ${side.toUpperCase()} market order for ${volume} lot(s) of ${symbol} on Exness MT5?\n\nEntry estimate: ${PS.fmt(entry, PS.symMeta(symbol).dec)}\nStop loss: ${PS.fmt(stopLoss, PS.symMeta(symbol).dec)}\nTake profit: ${takeProfit ? PS.fmt(takeProfit, PS.symMeta(symbol).dec) : 'not set'}\nDesk-estimated stop risk: ${PS.money(risk, 'USD')} (USD model; MT5 recalculates in account currency)\nServer risk cap: ${maxRiskPercent}% of demo equity\n\nThe API and MT5 bridge will refuse live accounts. Check the MT5 terminal after submission.`;
+      if (!(await PS.confirm(text, { danger: true, confirmLabel: 'Send demo order' }))) return;
+      const button = root.querySelector('#demo-order-submit');
+      button.disabled = true;
+      const orderState = root.querySelector('#order-result');
+      orderState.textContent = 'Submitting demo order…';
+      try {
+        const submitted = await placeDemoOrder({ symbol, side, volume, stopLoss, takeProfit });
+        orderState.textContent = `Queued (${submitted.id.slice(0, 8)}). Waiting for the MT5 demo terminal…`;
+        const deadline = Date.now() + 70000;
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          const response = await getOrder(submitted.id);
+          const order = response.order;
+          if (['filled', 'partial', 'rejected', 'error', 'expired', 'unknown', 'acknowledged'].includes(order.status)) {
+            orderState.textContent = `Demo order ${order.status.toUpperCase()}: ${order.message || 'Check MT5 terminal history.'}${order.filledVolume ? ' · ' + PS.fmt(order.filledVolume, 3) + ' lots filled' : ''}${order.ticket ? ' · ticket ' + order.ticket : ''}${order.fillPrice ? ' · fill ' + PS.fmt(order.fillPrice, PS.symMeta(symbol).dec) : ''}`;
+            if (order.status === 'filled' || order.status === 'partial') PS.toast(order.status === 'partial' ? 'MT5 demo order partially filled' : 'MT5 demo order accepted');
+            else PS.toast('Order needs review: ' + order.status, 'err');
+            await refresh();
+            break;
+          }
+          orderState.textContent = `Order ${order.status} · ${order.message || 'Waiting for terminal confirmation.'}`;
+        }
+        if (Date.now() >= deadline) orderState.textContent = 'No final response yet. Check MT5 order history; do not submit again until you confirm whether it filled.';
+      } catch (err) {
+        orderState.textContent = err.message || 'Order request failed.';
+        PS.toast(err.message || 'Demo order failed', 'err');
+      } finally {
+        paintOrderTicket();
+      }
+    });
+    const acknowledge = root.querySelector('#order-acknowledge');
+    if (acknowledge) acknowledge.addEventListener('click', async () => {
+      const pending = status().pendingOrder;
+      if (!pending || pending.status !== 'unknown') return;
+      const ok = await PS.confirm('Have you checked MT5 order history for this order? Acknowledge only after review. This clears PipSage’s duplicate-send lock; it does not cancel or change any broker order.', { danger: true, confirmLabel: 'I checked MT5 history' });
+      if (!ok) return;
+      try {
+        await acknowledgeUnknown(pending.id);
+        await refresh();
+        PS.toast('Order marked reviewed');
+      } catch (err) { PS.toast(err.message || 'Could not acknowledge order', 'err'); }
+    });
+    paintOrderTicket();
+  }
+
+  function bindPage() {
+    bindSettingsPanel();
+    bindOrderTicket();
+    paintSettingsPanel();
+    paintOrderTicket();
+  }
+
+  document.addEventListener('ps:ready', bindPage);
+  document.addEventListener('pipsage:broker-update', bindPage);
+  const appRoot = document.getElementById('app');
+  if (appRoot && window.MutationObserver) {
+    new MutationObserver(() => {
+      if (state.bindPending) return;
+      state.bindPending = true;
+      Promise.resolve().then(() => {
+        state.bindPending = false;
+        bindPage();
+      });
+    }).observe(appRoot, { childList: true });
+  }
+
+  const originalMount = PS.mount;
+  if (typeof originalMount === 'function') {
+    PS.mount = function () {
+      start();
+      return originalMount.apply(this, arguments);
+    };
+  }
 })();
 
 
@@ -2996,7 +3434,7 @@ def normalise(path):
 
   /* derive live-ish trade numbers */
   ui.liveTrade = function (t) {
-    const px = t.status === 'open' ? PS.price(t.sym) : t.exit;
+    const px = t.status === 'open' ? PS.price(t.sym, t.side) : t.exit;
     const pnl = t.status === 'open' ? PS.pnlFor(t.sym, t.side, t.lots, t.entry, px) : t.pnl;
     const r = PS.rFor(t.sym, t.side, t.lots, t.entry, px, t.sl);
     return Object.assign({}, t, {
@@ -3206,7 +3644,7 @@ def normalise(path):
     /* KPI tiles */
     const kpis = `<div class="grid g6">
       ${ui.kpi({ k: 'Equity', v: money(equity, ccy, 0), d: `<span class="num">${money(acc.balance, ccy, 0)}</span> balance`, accent: true, iconName: 'gauge' })}
-      ${ui.kpi({ k: 'Open P&L', v: `<span class="${klass(acc.openPnl)}">${money(acc.openPnl, ccy)}</span>`, d: `${acc.open.length} position${acc.open.length === 1 ? '' : 's'}`, iconName: 'layers' })}
+      ${ui.kpi({ k: 'Open P&L', v: `<span class="${klass(acc.openPnl)}" data-live-total-pnl>${money(acc.openPnl, ccy)}</span>`, d: `${acc.open.length} position${acc.open.length === 1 ? '' : 's'}`, iconName: 'layers' })}
       ${ui.kpi({ k: 'Today', v: `<span class="${klass(todayPnl)}">${money(todayPnl, ccy)}</span>`, d: `${todayClosed.length} closed`, iconName: 'clock' })}
       ${ui.kpi({ k: 'Realised', v: `<span class="${klass(stats.net)}">${money(stats.net, ccy)}</span>`, d: `${stats.count} trades all-time`, iconName: 'chart' })}
       ${ui.kpi({ k: 'Win rate', v: fmt(stats.winRate, 1) + '<small>%</small>', d: `${stats.wins}W · ${stats.losses}L`, iconName: 'target' })}
@@ -3266,16 +3704,16 @@ def normalise(path):
         <td><strong>${esc(t.sym)}</strong><div class="xs dim">${esc(t.setup || '')}</div></td>
         <td>${ui.chip(t.side.toUpperCase(), t.side === 'buy' ? 'green' : 'red')}</td>
         <td class="num">${PS.fmtPrice(t.entry)}</td>
-        <td class="num">${PS.fmtPrice(t.markPrice)}</td>
-        <td class="num ${klass(t.livePnl)}">${money(t.livePnl, ccy)}</td>
-        <td class="num ${klass(t.liveR)}">${signed(t.liveR, 2)}R</td>
+        <td class="num" data-market-price="${t.sym}" data-market-side="${t.side}">${PS.fmtPrice(t.markPrice)}</td>
+        <td class="num ${klass(t.livePnl)}" data-live-pnl="${t.sym}" data-side="${t.side}" data-lots="${t.lots}" data-entry="${t.entry}">${money(t.livePnl, ccy)}</td>
+        <td class="num ${klass(t.liveR)}" data-live-r="${t.sym}" data-side="${t.side}" data-lots="${t.lots}" data-entry="${t.entry}" data-stop="${t.sl || 0}">${signed(t.liveR, 2)}R</td>
       </tr>`;
     });
 
     const positionsPanel = ui.panel({
       title: 'Open positions',
-      sub: `${acc.open.length} live · marks are sample prices`,
-      right: `<a class="btn btn-sm btn-ghost" href="positions.html">Manage ${icon('arrowRight')}</a>`,
+      sub: `${acc.open.length} local journal position${acc.open.length === 1 ? '' : 's'} · marks use current feed when connected`,
+      right: `<span class="chip chip-amber" data-market-feed>sample feed</span><a class="btn btn-sm btn-ghost" href="positions.html">Manage ${icon('arrowRight')}</a>`,
       flush: true,
       body: ui.table({
         cols: ['Instrument', 'Side', { label: 'Entry', num: true }, { label: 'Mark', num: true }, { label: 'P&L', num: true }, { label: 'R', num: true }],
@@ -3292,15 +3730,15 @@ def normalise(path):
       const series = PS.candles(sym, 24).map((c) => c.c);
       return `<tr>
         <td><strong>${esc(sym)}</strong><div class="xs dim">${esc(meta.cls)}</div></td>
-        <td class="num">${fmt(px, meta.dec)}</td>
-        <td class="num ${klass(chg)}">${pctStr(chg)}</td>
+        <td class="num" data-market-price="${sym}">${fmt(px, meta.dec)}</td>
+        <td class="num ${klass(chg)}" data-market-day="${sym}">${pctStr(chg)}</td>
         <td style="width:74px">${PS.sparkSvg(series, { w: 66, h: 18 })}</td>
       </tr>`;
     });
 
     const watchPanel = ui.panel({
       title: 'Watchlist',
-      right: `<a class="btn btn-sm btn-ghost" href="charts.html">Charts ${icon('arrowRight')}</a>`,
+      right: `<span class="chip chip-amber" data-market-feed>sample feed</span><a class="btn btn-sm btn-ghost" href="charts.html">Charts ${icon('arrowRight')}</a>`,
       flush: true,
       body: ui.table({
         cols: ['Market', { label: 'Price', num: true }, { label: 'Day', num: true }, { label: '', num: false }],
@@ -3484,8 +3922,8 @@ def normalise(path):
     root.innerHTML = `
       <div class="page-head">
         <div class="titles">
-          <h1>Charts <span class="chip chip-amber" style="margin-left:2px">sample feed</span></h1>
-          <div class="sub">Analysis workspace · crosshair, zoom and pan enabled</div>
+          <h1>Charts <span class="chip chip-amber" data-market-feed style="margin-left:2px">sample feed</span></h1>
+          <div class="sub">Sample OHLC candles · crosshair, zoom and pan enabled</div>
         </div>
         <div class="actions">
           <div class="seg" id="tf-seg">
@@ -3516,8 +3954,8 @@ def normalise(path):
                         <span class="xs dim" style="display:block">${esc(m.cls)}</span>
                       </span>
                       <span class="right">
-                        <span class="mono xs" style="display:block">${fmt(PS.price(sym), m.dec)}</span>
-                        <span class="mono xs ${klass(chg)}">${PS.pctStr(chg)}</span>
+                        <span class="mono xs" style="display:block" data-market-price="${sym}">${fmt(PS.price(sym), m.dec)}</span>
+                        <span class="mono xs ${klass(chg)}" data-market-day="${sym}">${PS.pctStr(chg)}</span>
                       </span>
                     </button>`;
                   })
@@ -3549,8 +3987,8 @@ def normalise(path):
                 <div class="row" style="gap:10px">
                   <h2 style="font-size:14px">${esc(state.sym)}</h2>
                   <span class="chip chip-plain">${esc(meta.cls)}</span>
-                  <span class="mono sm" id="last-px">${fmt(PS.price(state.sym), meta.dec)}</span>
-                  <span class="mono xs ${klass(PS.dailyChange(state.sym))}" id="last-chg">${PS.pctStr(PS.dailyChange(state.sym))}</span>
+                  <span class="mono sm" id="last-px" data-market-price="${state.sym}">${fmt(PS.price(state.sym), meta.dec)}</span>
+                  <span class="mono xs ${klass(PS.dailyChange(state.sym))}" id="last-chg" data-market-day="${state.sym}">${PS.pctStr(PS.dailyChange(state.sym))}</span>
                 </div>
                 <div class="right">
                   <span class="label" style="margin-right:2px">Pane</span>
@@ -3594,12 +4032,29 @@ def normalise(path):
           <div style="display:grid;gap:10px" id="col-side">
             ${ui.panel({
               title: 'Market',
+              sub: 'Indicators use sample candles; bid/ask follows the live feed when connected',
               body: `<div id="market-info"></div>`,
             })}
             ${ui.panel({
               title: 'Position size',
               sub: 'From your risk settings',
               body: `<div id="sizer" class="col" style="gap:9px"></div>`,
+            })}
+            ${ui.panel({
+              title: 'Exness MT5 demo ticket',
+              sub: 'Market orders · demo account only',
+              body: `<div class="col" id="demo-order-ticket" style="gap:9px">
+                <p class="xs dim">Requires a verified MT5 demo quote and owner connection from Settings. A protective stop is mandatory; the desktop bridge rechecks the broker-calculated risk before sending.</p>
+                ${ui.field({ label: 'Instrument', id: 'order-symbol', value: state.sym, options: PS.SYMBOLS.map((x) => ({ value: x.sym, label: x.sym })) })}
+                ${ui.field({ label: 'Side', id: 'order-side', value: 'buy', options: [{ value: 'buy', label: 'Buy / long' }, { value: 'sell', label: 'Sell / short' }] })}
+                ${ui.field({ label: 'Volume (lots)', id: 'order-volume', type: 'number', value: '0.01', attrs: 'min="0.01" max="100" step="0.01"' })}
+                ${ui.field({ label: 'Stop loss (required)', id: 'order-stop', type: 'number', value: '', placeholder: 'Price', attrs: 'min="0.00001" step="any"' })}
+                ${ui.field({ label: 'Take profit (optional)', id: 'order-target', type: 'number', value: '', placeholder: 'Price', attrs: 'min="0.00001" step="any"' })}
+                <p class="xs dim" id="order-preview">Waiting for an authenticated, fresh MT5 demo quote. No sample price can be used to place an order.</p>
+                <button class="btn btn-primary btn-block" id="demo-order-submit" disabled>Send demo order</button>
+                <button class="btn btn-sm btn-block" id="order-acknowledge" hidden>Mark reviewed in MT5</button>
+                <p class="xs" id="order-result" role="status" aria-live="polite"></p>
+              </div>`,
             })}
             ${ui.panel({
               title: 'Session',
@@ -3721,11 +4176,12 @@ def normalise(path):
     const lastC = candles[candles.length - 1].c;
     const bbU = bb.upper.filter((v) => v != null).pop();
     const bbL = bb.lower.filter((v) => v != null).pop();
-    const spreadPts = Math.round(meta.base * (meta.vol / 100) * 0.35 * (meta.dec > 3 ? 10000 : 1));
+    const sampleBid = lastC - meta.base * 0.00002;
+    const sampleAsk = lastC + meta.base * 0.00002;
 
     info.innerHTML = ui.statRows([
-      { k: 'Bid / Ask', v: `${fmt(lastC - meta.base * 0.00002, meta.dec)} / ${fmt(lastC + meta.base * 0.00002, meta.dec)}` },
-      { k: 'Spread', v: spreadPts + ' pts' },
+      { k: 'Bid / Ask', v: `<span data-market-bidask="${state.sym}">${fmt(sampleBid, meta.dec)} / ${fmt(sampleAsk, meta.dec)}</span>` },
+      { k: 'Spread (price)', v: `<span data-market-spread="${state.sym}">${fmt(sampleAsk - sampleBid, meta.dec)}</span>` },
       { k: 'ATR (14)', v: fmt(atr, meta.dec) },
       { k: 'RSI (14)', v: fmt(rsi, 1), cls: rsi > 70 ? 'dn' : rsi < 30 ? 'up' : '' },
       { k: 'ADX (14)', v: fmt(adxV, 1) },
@@ -3928,16 +4384,16 @@ def normalise(path):
         </td>
         <td>${ui.chip(t.side.toUpperCase(), t.side === 'buy' ? 'green' : 'red')}<div class="xs dim" style="margin-top:2px">${fmt(t.lots, 2)} lots</div></td>
         <td class="num">${PS.fmtPrice(t.entry)}</td>
-        <td class="num">${PS.fmtPrice(t.markPrice)}</td>
+        <td class="num" data-market-price="${t.sym}" data-market-side="${t.side}">${PS.fmtPrice(t.markPrice)}</td>
         <td class="num">${t.sl ? PS.fmtPrice(t.sl) : '—'}</td>
         <td class="num">${t.tp ? PS.fmtPrice(t.tp) : '—'}</td>
-        <td class="num ${klass(t.livePnl)}">${money(t.livePnl, ccy)}</td>
-        <td class="num ${klass(t.liveR)}">${signed(t.liveR, 2)}R</td>
+        <td class="num ${klass(t.livePnl)}" data-live-pnl="${t.sym}" data-side="${t.side}" data-lots="${t.lots}" data-entry="${t.entry}">${money(t.livePnl, ccy)}</td>
+        <td class="num ${klass(t.liveR)}" data-live-r="${t.sym}" data-side="${t.side}" data-lots="${t.lots}" data-entry="${t.entry}" data-stop="${t.sl || 0}">${signed(t.liveR, 2)}R</td>
         <td class="num dim">${money(riskCash, ccy, 0)}</td>
         <td style="text-align:right">
           <div class="row" style="gap:3px;justify-content:flex-end">
-            <button class="icon-btn" data-modify="${t.id}" title="Modify">${icon('edit')}</button>
-            <button class="icon-btn" data-close="${t.id}" title="Close position">${icon('x')}</button>
+            <button class="icon-btn" data-modify="${t.id}" title="Edit journal record">${icon('edit')}</button>
+            <button class="icon-btn" data-close="${t.id}" title="Record journal closure">${icon('x')}</button>
           </div>
         </td>
       </tr>`;
@@ -3966,21 +4422,22 @@ def normalise(path):
           <div class="sub">Open exposure, risk to stops and execution history</div>
         </div>
         <div class="actions">
+          <span class="chip chip-amber" data-market-feed>sample feed</span>
           <button class="btn btn-sm" data-act="export">${icon('download')}Export</button>
           <button class="btn btn-sm btn-primary" data-act="new">${icon('plus')}New position</button>
         </div>
       </div>
       <div class="page-body">
         <div class="grid g4">
-          ${ui.kpi({ k: 'Open P&L', v: `<span class="${klass(totalPnl)}">${money(totalPnl, ccy)}</span>`, d: `${open.length} position${open.length === 1 ? '' : 's'}`, accent: true, iconName: 'layers' })}
+          ${ui.kpi({ k: 'Open P&L', v: `<span class="${klass(totalPnl)}" data-live-total-pnl>${money(totalPnl, ccy)}</span>`, d: `${open.length} position${open.length === 1 ? '' : 's'}`, accent: true, iconName: 'layers' })}
           ${ui.kpi({ k: 'Risk to stops', v: money(grossRisk, ccy, 0), d: `${fmt((grossRisk / acc.balance) * 100, 2)}% of balance`, iconName: 'shield' })}
-          ${ui.kpi({ k: 'Free margin', v: money(acc.balance - grossRisk, ccy, 0), d: 'balance − open risk', iconName: 'scale' })}
+          ${ui.kpi({ k: 'Balance after stop risk', v: money(acc.balance - grossRisk, ccy, 0), d: 'local balance − open risk', iconName: 'scale' })}
           ${ui.kpi({ k: 'Closed today', v: String(closed.filter((t) => t.closedAt >= new Date().setHours(0, 0, 0, 0)).length), d: `${money(closed.filter((t) => t.closedAt >= new Date().setHours(0, 0, 0, 0)).reduce((a, t) => a + t.pnl, 0), ccy)} realised`, iconName: 'check' })}
         </div>
 
         ${ui.panel({
           title: 'Open positions',
-          sub: 'Sample marks — not a broker feed',
+          sub: 'Local journal positions · marks use the current feed when connected',
           right: `<div class="seg" id="pos-filter">
             <button class="active" data-f="all">All</button>
             <button data-f="buy">Long</button>
@@ -4051,7 +4508,7 @@ def normalise(path):
         const t = all.find((x) => x.id === b.dataset.close);
         if (!t) return;
         const live = ui.liveTrade(t);
-        const ok = await PS.confirm(`Close ${t.sym} ${t.side} ${t.lots} lots at the current mark (${PS.fmtPrice(live.markPrice)})? This locks in ${money(live.livePnl, ccy)}.`, { confirmLabel: 'Close position' });
+        const ok = await PS.confirm(`Record ${t.sym} ${t.side} ${t.lots} lots as closed in the local journal at the current mark (${PS.fmtPrice(live.markPrice)})? This records ${money(live.livePnl, ccy)} and does not close any MT5 position.`, { confirmLabel: 'Record closure' });
         if (!ok) return;
         t.status = 'closed';
         t.exit = live.markPrice;
@@ -4059,7 +4516,7 @@ def normalise(path):
         t.pnl = +live.livePnl.toFixed(2);
         t.r = +live.liveR.toFixed(2);
         Store.set(KEYS.trades, all);
-        PS.toast(`${t.sym} closed · ${money(t.pnl, ccy)}`);
+        PS.toast(`${t.sym} journal record closed · ${money(t.pnl, ccy)}`);
         rerender();
       })
     );
@@ -4069,8 +4526,9 @@ def normalise(path):
         const t = all.find((x) => x.id === b.dataset.modify);
         if (!t) return;
         const m = PS.modal({
-          title: `Modify ${t.sym}`,
-          body: `<div class="grid g2" style="gap:10px">
+          title: `Edit journal record · ${t.sym}`,
+          body: `<p class="xs dim">These values update this local journal record only; they do not modify an MT5 order or stop.</p>
+            <div class="grid g2" style="gap:10px">
               ${ui.field({ label: 'Stop loss', id: 'md-sl', type: 'number', value: t.sl })}
               ${ui.field({ label: 'Take profit', id: 'md-tp', type: 'number', value: t.tp })}
             </div>
@@ -4082,7 +4540,7 @@ def normalise(path):
               t.tp = Number(el.querySelector('#md-tp').value) || t.tp;
               Store.set(KEYS.trades, all);
               close();
-              PS.toast('Order modified');
+              PS.toast('Journal record updated');
               rerender();
             });
           },
@@ -4354,7 +4812,7 @@ def normalise(path):
           const preview = () => {
             const v = read();
             const open = !v.exit;
-            const px = open ? PS.price(v.sym) : v.exit;
+            const px = open ? PS.price(v.sym, v.side) : v.exit;
             const pnl = PS.pnlFor(v.sym, v.side, v.lots, v.entry, px);
             const riskCash = PS.riskCashFor(v.sym, v.lots, v.entry, v.sl);
             const r = PS.rFor(v.sym, v.side, v.lots, v.entry, px, v.sl);
@@ -6310,7 +6768,7 @@ def normalise(path):
       <div class="page-head">
         <div class="titles">
           <h1>Settings</h1>
-          <div class="sub">Everything lives on this device — no accounts, no cloud</div>
+          <div class="sub">Journal and preferences stay in this browser; optional broker relay is separate</div>
         </div>
         <div class="actions">
           <button class="btn btn-sm btn-primary" data-act="save">${icon('save')}Save</button>
@@ -6348,8 +6806,8 @@ def normalise(path):
         </div>
 
         ${ui.panel({
-          title: 'Broker accounts',
-          sub: 'Descriptive only — this static build cannot place orders',
+          title: 'Sample broker accounts',
+          sub: 'Seeded examples only — not linked to your Exness account',
           flush: true,
           body: `<div>${accounts
             .map(
@@ -6365,9 +6823,24 @@ def normalise(path):
               </div>`
             )
             .join('')}</div>`,
-          foot: `<div class="row-between"><span class="xs">No live connection exists in this build. Adding one needs a backend with an MT5 bridge.</span>
-            <button class="btn btn-sm" disabled>Connect</button></div>`,
+          foot: `<div class="row-between"><span class="xs">These records are local demo examples, not connected accounts.</span></div>`,
         })}
+
+        <section class="panel" id="broker-link-panel">
+          <div class="panel-head"><div><h2>Exness MT5 connection</h2><div class="sub">Owner-authenticated · demo account only</div></div><span class="chip chip-amber" id="broker-link-state">Checking setup…</span></div>
+          <div class="panel-body" style="display:grid;gap:10px">
+            <p class="sm muted" id="broker-link-detail">MT5 credentials stay in your logged-in desktop terminal. PipSage never asks for or stores your broker password.</p>
+            <div class="field">
+              <label for="broker-owner-token">PipSage API owner token</label>
+              <input class="in" id="broker-owner-token" type="password" autocomplete="new-password" placeholder="Paste the Render PIPSAGE_OWNER_TOKEN here">
+              <span class="hint">This is not your Exness password or MT5 login. It is kept in this tab session only.</span>
+            </div>
+            <div class="row" style="gap:8px;flex-wrap:wrap">
+              <button class="btn btn-sm btn-primary" id="broker-connect">${icon('shield')}Connect securely</button>
+              <button class="btn btn-sm" id="broker-disconnect" hidden>Disconnect this tab</button>
+            </div>
+          </div>
+        </section>
 
         <div class="grid g2">
           ${ui.panel({

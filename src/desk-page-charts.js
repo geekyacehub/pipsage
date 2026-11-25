@@ -43,8 +43,8 @@
     root.innerHTML = `
       <div class="page-head">
         <div class="titles">
-          <h1>Charts <span class="chip chip-amber" style="margin-left:2px">sample feed</span></h1>
-          <div class="sub">Analysis workspace · crosshair, zoom and pan enabled</div>
+          <h1>Charts <span class="chip chip-amber" data-market-feed style="margin-left:2px">sample feed</span></h1>
+          <div class="sub">Sample OHLC candles · crosshair, zoom and pan enabled</div>
         </div>
         <div class="actions">
           <div class="seg" id="tf-seg">
@@ -75,8 +75,8 @@
                         <span class="xs dim" style="display:block">${esc(m.cls)}</span>
                       </span>
                       <span class="right">
-                        <span class="mono xs" style="display:block">${fmt(PS.price(sym), m.dec)}</span>
-                        <span class="mono xs ${klass(chg)}">${PS.pctStr(chg)}</span>
+                        <span class="mono xs" style="display:block" data-market-price="${sym}">${fmt(PS.price(sym), m.dec)}</span>
+                        <span class="mono xs ${klass(chg)}" data-market-day="${sym}">${PS.pctStr(chg)}</span>
                       </span>
                     </button>`;
                   })
@@ -108,8 +108,8 @@
                 <div class="row" style="gap:10px">
                   <h2 style="font-size:14px">${esc(state.sym)}</h2>
                   <span class="chip chip-plain">${esc(meta.cls)}</span>
-                  <span class="mono sm" id="last-px">${fmt(PS.price(state.sym), meta.dec)}</span>
-                  <span class="mono xs ${klass(PS.dailyChange(state.sym))}" id="last-chg">${PS.pctStr(PS.dailyChange(state.sym))}</span>
+                  <span class="mono sm" id="last-px" data-market-price="${state.sym}">${fmt(PS.price(state.sym), meta.dec)}</span>
+                  <span class="mono xs ${klass(PS.dailyChange(state.sym))}" id="last-chg" data-market-day="${state.sym}">${PS.pctStr(PS.dailyChange(state.sym))}</span>
                 </div>
                 <div class="right">
                   <span class="label" style="margin-right:2px">Pane</span>
@@ -153,12 +153,29 @@
           <div style="display:grid;gap:10px" id="col-side">
             ${ui.panel({
               title: 'Market',
+              sub: 'Indicators use sample candles; bid/ask follows the live feed when connected',
               body: `<div id="market-info"></div>`,
             })}
             ${ui.panel({
               title: 'Position size',
               sub: 'From your risk settings',
               body: `<div id="sizer" class="col" style="gap:9px"></div>`,
+            })}
+            ${ui.panel({
+              title: 'Exness MT5 demo ticket',
+              sub: 'Market orders · demo account only',
+              body: `<div class="col" id="demo-order-ticket" style="gap:9px">
+                <p class="xs dim">Requires a verified MT5 demo quote and owner connection from Settings. A protective stop is mandatory; the desktop bridge rechecks the broker-calculated risk before sending.</p>
+                ${ui.field({ label: 'Instrument', id: 'order-symbol', value: state.sym, options: PS.SYMBOLS.map((x) => ({ value: x.sym, label: x.sym })) })}
+                ${ui.field({ label: 'Side', id: 'order-side', value: 'buy', options: [{ value: 'buy', label: 'Buy / long' }, { value: 'sell', label: 'Sell / short' }] })}
+                ${ui.field({ label: 'Volume (lots)', id: 'order-volume', type: 'number', value: '0.01', attrs: 'min="0.01" max="100" step="0.01"' })}
+                ${ui.field({ label: 'Stop loss (required)', id: 'order-stop', type: 'number', value: '', placeholder: 'Price', attrs: 'min="0.00001" step="any"' })}
+                ${ui.field({ label: 'Take profit (optional)', id: 'order-target', type: 'number', value: '', placeholder: 'Price', attrs: 'min="0.00001" step="any"' })}
+                <p class="xs dim" id="order-preview">Waiting for an authenticated, fresh MT5 demo quote. No sample price can be used to place an order.</p>
+                <button class="btn btn-primary btn-block" id="demo-order-submit" disabled>Send demo order</button>
+                <button class="btn btn-sm btn-block" id="order-acknowledge" hidden>Mark reviewed in MT5</button>
+                <p class="xs" id="order-result" role="status" aria-live="polite"></p>
+              </div>`,
             })}
             ${ui.panel({
               title: 'Session',
@@ -280,11 +297,12 @@
     const lastC = candles[candles.length - 1].c;
     const bbU = bb.upper.filter((v) => v != null).pop();
     const bbL = bb.lower.filter((v) => v != null).pop();
-    const spreadPts = Math.round(meta.base * (meta.vol / 100) * 0.35 * (meta.dec > 3 ? 10000 : 1));
+    const sampleBid = lastC - meta.base * 0.00002;
+    const sampleAsk = lastC + meta.base * 0.00002;
 
     info.innerHTML = ui.statRows([
-      { k: 'Bid / Ask', v: `${fmt(lastC - meta.base * 0.00002, meta.dec)} / ${fmt(lastC + meta.base * 0.00002, meta.dec)}` },
-      { k: 'Spread', v: spreadPts + ' pts' },
+      { k: 'Bid / Ask', v: `<span data-market-bidask="${state.sym}">${fmt(sampleBid, meta.dec)} / ${fmt(sampleAsk, meta.dec)}</span>` },
+      { k: 'Spread (price)', v: `<span data-market-spread="${state.sym}">${fmt(sampleAsk - sampleBid, meta.dec)}</span>` },
       { k: 'ATR (14)', v: fmt(atr, meta.dec) },
       { k: 'RSI (14)', v: fmt(rsi, 1), cls: rsi > 70 ? 'dn' : rsi < 30 ? 'up' : '' },
       { k: 'ADX (14)', v: fmt(adxV, 1) },

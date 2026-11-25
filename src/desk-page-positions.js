@@ -47,16 +47,16 @@
         </td>
         <td>${ui.chip(t.side.toUpperCase(), t.side === 'buy' ? 'green' : 'red')}<div class="xs dim" style="margin-top:2px">${fmt(t.lots, 2)} lots</div></td>
         <td class="num">${PS.fmtPrice(t.entry)}</td>
-        <td class="num">${PS.fmtPrice(t.markPrice)}</td>
+        <td class="num" data-market-price="${t.sym}" data-market-side="${t.side}">${PS.fmtPrice(t.markPrice)}</td>
         <td class="num">${t.sl ? PS.fmtPrice(t.sl) : '—'}</td>
         <td class="num">${t.tp ? PS.fmtPrice(t.tp) : '—'}</td>
-        <td class="num ${klass(t.livePnl)}">${money(t.livePnl, ccy)}</td>
-        <td class="num ${klass(t.liveR)}">${signed(t.liveR, 2)}R</td>
+        <td class="num ${klass(t.livePnl)}" data-live-pnl="${t.sym}" data-side="${t.side}" data-lots="${t.lots}" data-entry="${t.entry}">${money(t.livePnl, ccy)}</td>
+        <td class="num ${klass(t.liveR)}" data-live-r="${t.sym}" data-side="${t.side}" data-lots="${t.lots}" data-entry="${t.entry}" data-stop="${t.sl || 0}">${signed(t.liveR, 2)}R</td>
         <td class="num dim">${money(riskCash, ccy, 0)}</td>
         <td style="text-align:right">
           <div class="row" style="gap:3px;justify-content:flex-end">
-            <button class="icon-btn" data-modify="${t.id}" title="Modify">${icon('edit')}</button>
-            <button class="icon-btn" data-close="${t.id}" title="Close position">${icon('x')}</button>
+            <button class="icon-btn" data-modify="${t.id}" title="Edit journal record">${icon('edit')}</button>
+            <button class="icon-btn" data-close="${t.id}" title="Record journal closure">${icon('x')}</button>
           </div>
         </td>
       </tr>`;
@@ -85,21 +85,22 @@
           <div class="sub">Open exposure, risk to stops and execution history</div>
         </div>
         <div class="actions">
+          <span class="chip chip-amber" data-market-feed>sample feed</span>
           <button class="btn btn-sm" data-act="export">${icon('download')}Export</button>
           <button class="btn btn-sm btn-primary" data-act="new">${icon('plus')}New position</button>
         </div>
       </div>
       <div class="page-body">
         <div class="grid g4">
-          ${ui.kpi({ k: 'Open P&L', v: `<span class="${klass(totalPnl)}">${money(totalPnl, ccy)}</span>`, d: `${open.length} position${open.length === 1 ? '' : 's'}`, accent: true, iconName: 'layers' })}
+          ${ui.kpi({ k: 'Open P&L', v: `<span class="${klass(totalPnl)}" data-live-total-pnl>${money(totalPnl, ccy)}</span>`, d: `${open.length} position${open.length === 1 ? '' : 's'}`, accent: true, iconName: 'layers' })}
           ${ui.kpi({ k: 'Risk to stops', v: money(grossRisk, ccy, 0), d: `${fmt((grossRisk / acc.balance) * 100, 2)}% of balance`, iconName: 'shield' })}
-          ${ui.kpi({ k: 'Free margin', v: money(acc.balance - grossRisk, ccy, 0), d: 'balance − open risk', iconName: 'scale' })}
+          ${ui.kpi({ k: 'Balance after stop risk', v: money(acc.balance - grossRisk, ccy, 0), d: 'local balance − open risk', iconName: 'scale' })}
           ${ui.kpi({ k: 'Closed today', v: String(closed.filter((t) => t.closedAt >= new Date().setHours(0, 0, 0, 0)).length), d: `${money(closed.filter((t) => t.closedAt >= new Date().setHours(0, 0, 0, 0)).reduce((a, t) => a + t.pnl, 0), ccy)} realised`, iconName: 'check' })}
         </div>
 
         ${ui.panel({
           title: 'Open positions',
-          sub: 'Sample marks — not a broker feed',
+          sub: 'Local journal positions · marks use the current feed when connected',
           right: `<div class="seg" id="pos-filter">
             <button class="active" data-f="all">All</button>
             <button data-f="buy">Long</button>
@@ -170,7 +171,7 @@
         const t = all.find((x) => x.id === b.dataset.close);
         if (!t) return;
         const live = ui.liveTrade(t);
-        const ok = await PS.confirm(`Close ${t.sym} ${t.side} ${t.lots} lots at the current mark (${PS.fmtPrice(live.markPrice)})? This locks in ${money(live.livePnl, ccy)}.`, { confirmLabel: 'Close position' });
+        const ok = await PS.confirm(`Record ${t.sym} ${t.side} ${t.lots} lots as closed in the local journal at the current mark (${PS.fmtPrice(live.markPrice)})? This records ${money(live.livePnl, ccy)} and does not close any MT5 position.`, { confirmLabel: 'Record closure' });
         if (!ok) return;
         t.status = 'closed';
         t.exit = live.markPrice;
@@ -178,7 +179,7 @@
         t.pnl = +live.livePnl.toFixed(2);
         t.r = +live.liveR.toFixed(2);
         Store.set(KEYS.trades, all);
-        PS.toast(`${t.sym} closed · ${money(t.pnl, ccy)}`);
+        PS.toast(`${t.sym} journal record closed · ${money(t.pnl, ccy)}`);
         rerender();
       })
     );
@@ -188,8 +189,9 @@
         const t = all.find((x) => x.id === b.dataset.modify);
         if (!t) return;
         const m = PS.modal({
-          title: `Modify ${t.sym}`,
-          body: `<div class="grid g2" style="gap:10px">
+          title: `Edit journal record · ${t.sym}`,
+          body: `<p class="xs dim">These values update this local journal record only; they do not modify an MT5 order or stop.</p>
+            <div class="grid g2" style="gap:10px">
               ${ui.field({ label: 'Stop loss', id: 'md-sl', type: 'number', value: t.sl })}
               ${ui.field({ label: 'Take profit', id: 'md-tp', type: 'number', value: t.tp })}
             </div>
@@ -201,7 +203,7 @@
               t.tp = Number(el.querySelector('#md-tp').value) || t.tp;
               Store.set(KEYS.trades, all);
               close();
-              PS.toast('Order modified');
+              PS.toast('Journal record updated');
               rerender();
             });
           },
@@ -473,7 +475,7 @@
           const preview = () => {
             const v = read();
             const open = !v.exit;
-            const px = open ? PS.price(v.sym) : v.exit;
+            const px = open ? PS.price(v.sym, v.side) : v.exit;
             const pnl = PS.pnlFor(v.sym, v.side, v.lots, v.entry, px);
             const riskCash = PS.riskCashFor(v.sym, v.lots, v.entry, v.sl);
             const r = PS.rFor(v.sym, v.side, v.lots, v.entry, px, v.sl);

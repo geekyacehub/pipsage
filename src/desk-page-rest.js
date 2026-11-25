@@ -804,7 +804,7 @@
       <div class="page-head">
         <div class="titles">
           <h1>Settings</h1>
-          <div class="sub">Everything lives on this device — no accounts, no cloud</div>
+          <div class="sub">Journal and preferences stay in this browser; optional broker relay is separate</div>
         </div>
         <div class="actions">
           <button class="btn btn-sm btn-primary" data-act="save">${icon('save')}Save</button>
@@ -842,8 +842,8 @@
         </div>
 
         ${ui.panel({
-          title: 'Broker accounts',
-          sub: 'Descriptive only — this static build cannot place orders',
+          title: 'Sample broker accounts',
+          sub: 'Seeded examples only — not linked to your Exness account',
           flush: true,
           body: `<div>${accounts
             .map(
@@ -859,9 +859,24 @@
               </div>`
             )
             .join('')}</div>`,
-          foot: `<div class="row-between"><span class="xs">No live connection exists in this build. Adding one needs a backend with an MT5 bridge.</span>
-            <button class="btn btn-sm" disabled>Connect</button></div>`,
+          foot: `<div class="row-between"><span class="xs">These records are local demo examples, not connected accounts.</span></div>`,
         })}
+
+        <section class="panel" id="broker-link-panel">
+          <div class="panel-head"><div><h2>Exness MT5 connection</h2><div class="sub">Owner-authenticated · demo account only</div></div><span class="chip chip-amber" id="broker-link-state">Checking setup…</span></div>
+          <div class="panel-body" style="display:grid;gap:10px">
+            <p class="sm muted" id="broker-link-detail">MT5 credentials stay in your logged-in desktop terminal. PipSage never asks for or stores your broker password.</p>
+            <div class="field">
+              <label for="broker-owner-token">PipSage API owner token</label>
+              <input class="in" id="broker-owner-token" type="password" autocomplete="new-password" placeholder="Paste the Render PIPSAGE_OWNER_TOKEN here">
+              <span class="hint">This is not your Exness password or MT5 login. It is kept in this tab session only.</span>
+            </div>
+            <div class="row" style="gap:8px;flex-wrap:wrap">
+              <button class="btn btn-sm btn-primary" id="broker-connect">${icon('shield')}Connect securely</button>
+              <button class="btn btn-sm" id="broker-disconnect" hidden>Disconnect this tab</button>
+            </div>
+          </div>
+        </section>
 
         <div class="grid g2">
           ${ui.panel({
