@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: pipsage-desk
+    runtime: static
+    buildCommand: node build.js
+    staticPublishPath: .
